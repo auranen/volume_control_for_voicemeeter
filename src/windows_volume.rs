@@ -1,6 +1,5 @@
 use anyhow::Context;
 use std::sync::Arc;
-
 use windows::Win32::{
     Devices::FunctionDiscovery::PKEY_Device_DeviceDesc,
     Media::Audio::{
@@ -15,6 +14,7 @@ use windows::Win32::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
     },
 };
+use windows::Win32::Foundation::BOOL;
 
 #[derive(Debug, Clone)]
 pub struct VolumeObserver {
@@ -37,7 +37,7 @@ impl VolumeObserver {
         })
     }
 
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<f32>> {
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<(Option<f32>, Option<BOOL>)> {
         self.inner.rx.clone()
     }
 
@@ -93,7 +93,7 @@ impl VolumeObserver {
 
 #[derive(Debug)]
 struct VolumeObserverInner {
-    pub rx: tokio::sync::watch::Receiver<Option<f32>>,
+    pub rx: tokio::sync::watch::Receiver<(Option<f32>,Option<BOOL>)>,
     _keepalive: (IAudioEndpointVolumeCallback, IAudioEndpointVolume),
 }
 
@@ -105,7 +105,8 @@ impl VolumeObserverInner {
                 .context("Failed to activate device")?;
 
         let (tx, rx) = tokio::sync::watch::channel(
-            unsafe { endpoint_volume.GetMasterVolumeLevelScalar() }.ok(),
+            (unsafe { endpoint_volume.GetMasterVolumeLevelScalar() }.ok(),
+             unsafe { endpoint_volume.GetMute() }.ok())
         );
 
         // Don't drop this either!
@@ -124,7 +125,7 @@ impl VolumeObserverInner {
 #[derive(Debug)]
 #[windows::core::implement(IAudioEndpointVolumeCallback)]
 struct Callback {
-    pub tx: tokio::sync::watch::Sender<Option<f32>>,
+    pub tx: tokio::sync::watch::Sender<(Option<f32>, Option<BOOL>)>,
 }
 
 #[allow(non_snake_case)]
@@ -132,9 +133,11 @@ impl IAudioEndpointVolumeCallback_Impl for Callback {
     fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> windows::core::Result<()> {
         self.tx.send_if_modified(|x| {
             let volume = unsafe { &*data }.fMasterVolume;
+            let mute = unsafe { &*data }.bMuted;
 
-            if Some(volume) != *x {
-                x.replace(volume);
+            if (Some(volume), Some(mute)) != *x {
+                x.0.replace(volume);
+                x.1.replace(mute);
                 true
             } else {
                 false

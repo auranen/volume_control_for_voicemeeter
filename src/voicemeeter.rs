@@ -58,6 +58,16 @@ impl Link {
         }
     }
 
+    pub fn mute_parameter_of(
+        &self,
+        strip: &::voicemeeter::interface::parameters::Strip,
+    ) -> FloatParameter {
+        FloatParameter {
+            name: strip.param("Mute").into(),
+            link: self.clone(),
+        }
+    }
+
     pub async fn is_currently_connected(&self) -> bool {
         self.inner.remote.lock().await.is_parameters_dirty().is_ok()
     }

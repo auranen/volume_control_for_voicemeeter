@@ -5,11 +5,11 @@ mod windows_eco_mode;
 mod windows_volume;
 
 use std::sync::Arc;
-
-use anyhow::Context;
+use anyhow::{Context};
 use lerp::Lerp;
 use smol::future::FutureExt;
 use tokio::sync::Notify;
+use windows::Win32::Foundation::BOOL;
 
 fn print_error(err: impl std::fmt::Display) {
     println!("{err}");
@@ -110,6 +110,7 @@ async fn listen() -> anyhow::Result<()> {
     .or(async {
         let mut previous_vm_edition = ::voicemeeter::types::VoicemeeterApplication::None;
         let mut vm_gain_parameter = None;
+        let mut vm_mute_parameter = None;
 
         println!("Listening for volume changes");
 
@@ -120,11 +121,13 @@ async fn listen() -> anyhow::Result<()> {
                 .context("windows_volume_stream error 🤨")?;
 
             // linear position of the volume slider from 0.0 to 1.0
-            let Some(volume_slider_position) = ({ *windows_volume_stream.borrow() }) else {
+            let (Some(volume_slider_position), Some(mute)) = ({ *windows_volume_stream.borrow() }) else {
                 continue;
             };
 
-            println!("Changed to {volume_slider_position}");
+            let mute_bool = mute != BOOL(0);
+
+            println!("Changed to {volume_slider_position}, mute {mute_bool}");
 
             link.wait_for_connection().await;
 
@@ -138,21 +141,29 @@ async fn listen() -> anyhow::Result<()> {
 
                 if vm_edition != previous_vm_edition {
                     previous_vm_edition = vm_edition;
-                    vm_gain_parameter = Some({
-                        let strip = voicemeeter::Link::virtual_inputs(&remote).next().context(
-                            "There should absolutely be at least one \
+                    match voicemeeter::Link::virtual_inputs(&remote).next() {
+                        Some(strip) => {
+                            vm_gain_parameter = Some(link.gain_parameter_of(&strip));
+                            vm_mute_parameter = Some(link.mute_parameter_of(&strip));
+                        }
+                        _ => {
+                            print_error("There should absolutely be at least one \
                             Virtual Input in any Voicemeeter edition \
-                            but it's not there 🤷.",
-                        )?;
-
-                        link.gain_parameter_of(&strip)
-                    });
+                            but it's not there 🤷.")
+                        }
+                    }
                 }
             };
             let vm_gain_parameter = vm_gain_parameter.as_ref().unwrap();
+            let vm_mute_parameter = vm_mute_parameter.as_ref().unwrap();
 
             let gain = (-60.0).lerp(0.0, volume_slider_position);
 
+            vm_mute_parameter
+                .set(mute.0 as f32)
+                .await
+                .context("Couldn't set mute value")
+                .unwrap_or_else(print_error);
             vm_gain_parameter
                 .set(gain)
                 .await
